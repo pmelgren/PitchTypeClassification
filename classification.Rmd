@@ -1,0 +1,143 @@
+---
+title: "Pitch Arsenal Classification"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r,include=FALSE}
+library(data.table)
+library(ggplot2)
+```
+
+Prompt: Given a sample of Trackman data for a certain pitcher within a season, classify the pitches in the sample.
+
+##Data import and prep
+```{r}
+#read in the data and convert to a data.table
+all = data.table(read.csv("./trackman_data.csv",na.strings = "NULL"))
+
+#remove the 6 rows without any Trackman data
+tmd = all[complete.cases(all[,list(rel_speed,horz_break
+                                   ,induced_vert_break,spin_rate)]),]
+```
+
+```{r}
+#use break numbers to make a "tilt" variable (or spin direction)
+tmd[,tilt := atan(horz_break/induced_vert_break)]
+tmd[induced_vert_break<0,tilt:= pi+tilt]
+
+#the atan cutoff separated one point from its apparent cluster so cheat
+#a little here to get it back with the rest of its similar points
+tmd[tilt < -1.5,tilt:=tilt+2*pi]
+
+```
+
+```{r}
+#create several scatterplots to look at the data
+ggplot(tmd,aes(x=tilt,y=rel_speed))+geom_point()+
+  ggtitle("Velo vs Tilt",subtitle = "Unclustered")+
+  xlab("Tilt")+ylab("Pitch Velo")
+ggplot(tmd,aes(x=horz_break,y=induced_vert_break))+geom_point()+
+  ggtitle("Vertical Break vs Horizontal Break",subtitle = "Unclustered")+
+  xlab("Horizontal Break")+ylab("Induced Vertical Break")
+ggplot(tmd,aes(x=tilt,y=spin_rate))+geom_point(aes(color = rel_speed))+
+  labs(title = "Spin Rate, Tilt and Velo",subtitle = "Unclustered"
+       ,color = "Velo")+
+  xlab("Tilt")+ylab("Spin Rate")
+```
+\pagebreak
+
+##Clustering
+
+Based on these charts Spin Rate and Tilt seem to break into 3 very clear clusters so we'll cluster across those 2 variables.
+```{r}
+#filter out only the columns for the clustering analysis and scale
+cld = scale(tmd[,list(spin_rate,tilt)])
+
+#Perform Heirarchical clustering analysis on cld just to verify 3 clusters
+hc = hclust(dist(cld),method="complete")
+
+#plot the dendrogram 
+plot(hc, main="Heirarchical Clustering Dendrogram"
+     ,xlab = "",sub = "",labels = FALSE)
+
+```
+
+Based on the dendrogram, 3 clusters still appears to be the right amount.
+```{r}
+#label the pitches in tmd by cluster
+cl = kmeans(cld,3)
+tmd[,type := as.factor(cl$cluster)]
+
+```
+Recreate the same charts as above but colored by cluster to evaluate the accuracy of my clusters.
+```{r}
+#plot the pitches by cluster to determine which is better
+ggplot(tmd,aes(x=tilt,y=rel_speed))+
+  geom_point(aes(color = type))+
+  ggtitle("Velo vs Tilt",subtitle = "3 Clusters")+
+  xlab("Tilt")+ylab("Pitch Velo")
+ggplot(tmd,aes(x=horz_break,y=induced_vert_break))+
+  geom_point(aes(color = type))+
+  labs(title="Vertical Break vs Horizontal Break",subtitle = "3 Clusters"
+       ,color = "Cluster")+
+  xlab("Horizontal Break")+ylab("Induced Vertical Break")
+ggplot(tmd,aes(x=tilt,y=spin_rate))+geom_point(aes(color = type))+
+  labs(title = "Spin Rate vs Tilt",subtitle = "3 Clusters"
+       ,color = "Velo")+
+  xlab("Tilt")+ylab("Spin Rate")
+```
+
+Velocity and movement can run together between 2 of the clusters, but the velo vs tilt graph does support that these are the correct clusters, so move forward by manually defining each cluster.
+```{r}
+#get average spin rate for each cluster in a table
+sm = tmd[,list(spin = mean(spin_rate)),by = type]
+
+#Assign each cluster its proper pitch type name using some basic logic
+levels(tmd$type)[sm[spin == min(sm$spin),type]] = "Changeup"
+levels(tmd$type)[sm[spin == max(sm$spin),type]] = "Curveball"
+levels(tmd$type)[levels(tmd$type) %in% 1:3] = "Fastball"
+```
+\pagebreak
+
+##View statistics by cluster
+```{r}
+#add binary columns of in/out of zone, swing, and strike.
+tmd[,inzone := ifelse(abs(plate_loc_side) < .75 & 
+                        plate_loc_height > 1.5 & 
+                        plate_loc_height < 3.75,1,0)]
+tmd[,swing := ifelse(pitch_call %in% c("FoulBall","InPlay"
+                                       ,"StrikeSwinging")
+                     ,1,0)]
+tmd[,strike := ifelse(pitch_call %in% c("BallCalled"
+                                         ,"BallIntentional"
+                                         ,"HitByPitch")
+                      ,0,1)]
+
+#print a table of pitch-level metrics to analyze the pitch types
+tmd[,list(velo=mean(rel_speed),spin=mean(spin_rate)
+          ,h_break = mean(horz_break),v_break = mean(induced_vert_break)
+          ,zone_pct = mean(inzone)
+          ,strike_pct = mean(strike)
+          ,chase = sum(swing*(1-inzone))/sum(1-inzone)
+          ,whiff = sum(pitch_call == "StrikeSwinging")/sum(swing)
+          ,exit_velo = mean(exit_speed,na.rm = TRUE)
+          ,angle = mean(angle,na.rm = TRUE)
+          ,p = length(exit_speed),HR = sum(play_result == "HomeRun"))
+    ,by = type]
+```
+##Output the classifications as a CSV
+```{r}
+#add the classifications back to the original data
+setkey(tmd,pitch_id)
+setkey(all,pitch_id)
+classified = tmd[all][,list(pitch_id,type)][order(pitch_id)]
+
+#set the few records with no Trackman data as "undefined"
+classified[is.na(type),type := "Undefined"]
+
+#write back to a csv
+write.csv(classified
+          ,"./Classified_pitches.csv",row.names = FALSE)
+```
