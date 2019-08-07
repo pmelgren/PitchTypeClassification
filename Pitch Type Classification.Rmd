@@ -1,8 +1,8 @@
 ---
 title: "Pitch Arsenal Classification"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 
 ```{r,include=FALSE}
